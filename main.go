@@ -17,7 +17,7 @@ func main() {
 		log.Fatal("TELEGRAM_BOT_TOKEN is empty")
 	}
 
-	dsn := os.Getenv("postgres://user:333@127.0.0.1:5432/volgobot?sslmode=disable")
+	dsn := os.Getenv("postgres://volgobot_user:333@127.0.0.1:5432/volgobot?sslmode=disable")
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is empty. Example: postgres://user:pass@127.0.0.1:5432/volgobot?sslmode=disable")
 	}
