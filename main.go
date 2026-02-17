@@ -37,11 +37,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	// Создаем таблицы, если их нет
-	if err := initDB(ctx, pool); err != nil {
-		log.Fatal("initDB error:", err)
-	}
-
 	bot, err := tgbotapi.NewBotAPI(telegramToken)
 	if err != nil {
 		log.Fatal(err)
