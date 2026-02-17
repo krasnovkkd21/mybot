@@ -15,30 +15,14 @@ const (
 	cbOpenMainBot = "open_main_bot"
 )
 
-var allowedParams = map[string]bool{
-	"kw_vpsru":        true,
-	"kw_vps":          true,
-	"kw_freevps":      true,
-	"kw_vpsforpc":     true,
-	"kw_happvps":      true,
-	"kw_freevpsen":    true,
-	"kw_vpsandroid":   true,
-	"kw_vpsiphone":    true,
-	"kw_vpswhitelist": true,
-}
-
 func main() {
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
 		log.Fatal("TELEGRAM_BOT_TOKEN is empty")
 	}
 
-	// username основного бота (без @)
-	mainBotUsername := os.Getenv("MAIN_BOT_USERNAME")
-	if mainBotUsername == "" {
-		mainBotUsername = "MainBotUsernameHere"
-	}
-	mainBotURL := "https://t.me/" + mainBotUsername
+	// Основной бот — куда переводим по нажатию
+	mainBotURL := "https://t.me/volgogradVPN_bot"
 
 	db, err := sql.Open("sqlite3", "./events.db")
 	if err != nil {
@@ -59,8 +43,8 @@ func main() {
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
 
-	startText := "🖐️Привет! Высокоскоростное подключение к любым сайтам и бесперебойная работа всего в 1 шаге от тебя!\n\n" +
-		"Запускай основного бота ниже и пользуйся сервисом 5 ДНЕЙ на 3 УСТРОЙСТВАХ без ограничений в скорости и качестве!🤩"
+	startText := " Привет! Высокоскоростное подключение к любым сайтам и бесперебойная работа всего в 1 шаге от тебя!\n\n" +
+		"Запускай основного бота ниже и пользуйся сервисом 5 ДНЕЙ на 3 УСТРОЙСТВАХ без ограничений в скорости и качестве!"
 
 	for update := range updates {
 
@@ -70,47 +54,55 @@ func main() {
 			if param == "" {
 				param = "organic"
 			}
-			// если хочешь учитывать только твои kw_* — раскомментируй:
-			// if param != "organic" && !allowedParams[param] { param = "other" }
 
 			usr := update.Message.From
-			_ = upsertUserFirstSeen(db, usr)
 
-			if err := logEvent(db, "start", param, usr, update.Message.Chat.ID); err != nil {
-				log.Println("db start log error:", err)
+			// сохраняем юзера + логируем start
+			if err := upsertUser(db, usr); err != nil {
+				log.Println("db upsertUser error:", err)
+			}
+			if err := logEvent(db, "start", param, usr.ID, update.Message.Chat.ID); err != nil {
+				log.Println("db log start error:", err)
 			}
 
-			btn := tgbotapi.NewInlineKeyboardButtonData("🔥Запустить основного бота", cbOpenMainBot)
+			// callback-кнопка (чтобы поймать клик)
+			btn := tgbotapi.NewInlineKeyboardButtonData("Запустить основного бота", cbOpenMainBot)
 			kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btn))
 
 			msg := tgbotapi.NewMessage(update.Message.Chat.ID, startText)
 			msg.ReplyMarkup = kb
+
 			if _, err := bot.Send(msg); err != nil {
-				log.Println("send error:", err)
+				log.Println("send start message error:", err)
 			}
 			continue
 		}
 
-		// callback клик по кнопке
+		// Нажатие на кнопку
 		if update.CallbackQuery != nil {
 			q := update.CallbackQuery
 			usr := q.From
-			_ = upsertUserFirstSeen(db, usr)
+
+			if err := upsertUser(db, usr); err != nil {
+				log.Println("db upsertUser error:", err)
+			}
 
 			if q.Data == cbOpenMainBot {
-				// привяжем к последнему start_param пользователя
 				lastParam := getLastStartParam(db, usr.ID)
 
-				if err := logEvent(db, "click_main_bot", lastParam, usr, q.Message.Chat.ID); err != nil {
-					log.Println("db click log error:", err)
+				// логируем клик
+				if err := logEvent(db, "click_main_bot", lastParam, usr.ID, q.Message.Chat.ID); err != nil {
+					log.Println("db log click error:", err)
 				}
 
-				_, _ = bot.Request(tgbotapi.NewCallback(q.ID, "Готово ✅"))
-
-				out := tgbotapi.NewMessage(q.Message.Chat.ID,
-					"Вот основной бот: "+mainBotURL+"\n\nНажми и запусти его.")
-				if _, err := bot.Send(out); err != nil {
-					log.Println("send main bot url error:", err)
+				// ОТКРЫТЬ ссылку без сообщения
+				cb := tgbotapi.CallbackConfig{
+					CallbackQueryID: q.ID,
+					URL:             mainBotURL,
+				}
+				if _, err := bot.Request(cb); err != nil {
+					log.Println("callback open url error:", err)
+					// Сообщение НЕ отправляем, как ты и просил.
 				}
 			}
 		}
@@ -124,14 +116,14 @@ CREATE TABLE IF NOT EXISTS users (
 	username TEXT,
 	first_name TEXT,
 	last_name TEXT,
-	first_seen_ts TEXT NOT NULL
+	last_seen_ts TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	ts TEXT NOT NULL,
 	event_type TEXT NOT NULL,     -- start / click_main_bot
-	start_param TEXT NOT NULL,    -- kw_* / organic / other
+	start_param TEXT NOT NULL,    -- kw_* / organic / unknown
 	user_id INTEGER NOT NULL,
 	chat_id INTEGER NOT NULL
 );
@@ -143,23 +135,22 @@ CREATE INDEX IF NOT EXISTS idx_events_param ON events(start_param);
 	return err
 }
 
-func upsertUserFirstSeen(db *sql.DB, usr *tgbotapi.User) error {
-	// сохраняем first_seen один раз, но обновляем username/name (на случай если менялись)
+func upsertUser(db *sql.DB, usr *tgbotapi.User) error {
 	_, err := db.Exec(`
-INSERT INTO users (user_id, username, first_name, last_name, first_seen_ts)
+INSERT INTO users (user_id, username, first_name, last_name, last_seen_ts)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(user_id) DO UPDATE SET
 	username=excluded.username,
 	first_name=excluded.first_name,
-	last_name=excluded.last_name
+	last_name=excluded.last_name,
+	last_seen_ts=excluded.last_seen_ts
 `,
-		usr.ID, usr.UserName, usr.FirstName, usr.LastName,
-		time.Now().Format(time.RFC3339),
+		usr.ID, usr.UserName, usr.FirstName, usr.LastName, time.Now().Format(time.RFC3339),
 	)
 	return err
 }
 
-func logEvent(db *sql.DB, eventType, startParam string, usr *tgbotapi.User, chatID int64) error {
+func logEvent(db *sql.DB, eventType, startParam string, userID int64, chatID int64) error {
 	_, err := db.Exec(`
 INSERT INTO events (ts, event_type, start_param, user_id, chat_id)
 VALUES (?, ?, ?, ?, ?)
@@ -167,7 +158,7 @@ VALUES (?, ?, ?, ?, ?)
 		time.Now().Format(time.RFC3339),
 		eventType,
 		startParam,
-		usr.ID,
+		userID,
 		chatID,
 	)
 	return err
